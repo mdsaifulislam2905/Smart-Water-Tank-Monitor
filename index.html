@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Water Tank Monitor</title>
+
+  <!-- ═══════════════════════════════════════════════════════
+       Firebase Web SDK v9 (modular) — CDN
+  ════════════════════════════════════════════════════════ -->
+  <script type="module">
+    // ──────────────────────────────────────────────────────
+    //  ★  PASTE YOUR FIREBASE CONFIG HERE  ★
+    //  Go to: Firebase Console → Project Settings → Your Apps → Web App
+    // ──────────────────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey:            "AIzaSyDZm3bZCNKocmJsvwaYT2tuWL1Mfvj1JOU",
+      authDomain:        "smartwatertank-c24f5.firebaseapp.com",
+      databaseURL:       "https://smartwatertank-c24f5-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId:         "smartwatertank-c24f5",
+      storageBucket:     "smartwatertank-c24f5.firebasestorage.app",
+      messagingSenderId: "71978735734",
+      appId:             "1:71978735734:web:733a5d39dbc73130f5a757",
+      measurementId:     "G-TKZEZV4BJX"
+    };
+    // ──────────────────────────────────────────────────────
+
+    import { initializeApp }                    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getDatabase, ref, onValue, set }   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+    // ── Init Firebase ──────────────────────────────────────
+    const app = initializeApp(firebaseConfig);
+    const db  = getDatabase(app);
+
+    // ════════════════════════════════════════════════════════
+    //  REAL-TIME LISTENERS — Sensor Data
+    //  Path: /sensors/{key}
+    // ════════════════════════════════════════════════════════
+
+    // Water Level (0 – 100 %)
+    onValue(ref(db, "/sensors/waterLevel"), (snap) => {
+      const val = snap.val() ?? 0;
+      const pct = parseFloat(val).toFixed(1);
+
+      document.getElementById("levelValue").textContent = pct + "%";
+      updateGauge("levelGauge", pct);
+
+      const badge = document.getElementById("levelBadge");
+      if (pct < 20) {
+        badge.textContent = "⚠ Low";
+        badge.className   = "badge badge-danger";
+      } else if (pct > 80) {
+        badge.textContent = "● High";
+        badge.className   = "badge badge-warning";
+      } else {
+        badge.textContent = "✔ Normal";
+        badge.className   = "badge badge-good";
+      }
+
+      document.getElementById("tankFill").style.height = pct + "%";
+
+      // 🔔 Notification check
+      if (typeof checkLevelNotif === 'function') checkLevelNotif(parseFloat(pct));
+    });
+
+    // Temperature
+    onValue(ref(db, "/sensors/temperature"), (snap) => {
+      const val = parseFloat(snap.val() ?? 0).toFixed(1);
+      document.getElementById("tempValue").textContent = val + "°C";
+      updateGauge("tempGauge", Math.min((val / 50) * 100, 100));
+
+      const badge = document.getElementById("tempBadge");
+      if (val > 35) {
+        badge.textContent = "🔥 Hot";
+        badge.className   = "badge badge-danger";
+      } else if (val < 15) {
+        badge.textContent = "❄ Cold";
+        badge.className   = "badge badge-info";
+      } else {
+        badge.textContent = "✔ Normal";
+        badge.className   = "badge badge-good";
+      }
+
+      // 🔔 Notification check
+      if (typeof checkTempNotif === 'function') checkTempNotif(parseFloat(val));
+    });
+
+    // Turbidity
+    onValue(ref(db, "/sensors/turbidity"), (snap) => {
+      const val = parseFloat(snap.val() ?? 0).toFixed(1);
+      document.getElementById("turbValue").textContent = val + "%";
+      updateGauge("turbGauge", val);
+
+      const badge  = document.getElementById("turbBadge");
+      const status = document.getElementById("turbStatus");
+      if (val >= 50) {
+        badge.textContent  = "✔ Clear";
+        badge.className    = "badge badge-good";
+        status.textContent = "Water quality is GOOD";
+        status.className   = "turb-status status-good";
+      } else if (val >= 25) {
+        badge.textContent  = "⚠ Cloudy";
+        badge.className    = "badge badge-warning";
+        status.textContent = "Water quality is MODERATE";
+        status.className   = "turb-status status-moderate";
+      } else {
+        badge.textContent  = "✖ Turbid";
+        badge.className    = "badge badge-danger";
+        status.textContent = "Water quality is POOR — pump auto-activating";
+        status.className   = "turb-status status-poor";
+      }
+
+      // 🔔 Notification check
+      if (typeof checkTurbNotif === 'function') checkTurbNotif(parseFloat(val));
+    });
+
+    // Pump State (feedback from device)
+    onValue(ref(db, "/sensors/pumpState"), (snap) => {
+      const on = snap.val() === true;
+      document.getElementById("pumpIndicator").className =
+        "pump-indicator " + (on ? "pump-on" : "pump-off");
+      document.getElementById("pumpIndicatorText").textContent =
+        on ? "PUMP RUNNING" : "PUMP IDLE";
+
+      // 🔔 Notification check
+      if (typeof checkPumpNotif === 'function') checkPumpNotif(on);
+    });
+
+    // ════════════════════════════════════════════════════════
+    //  REAL-TIME LISTENERS — Control State (mirror UI toggles)
+    //  Path: /controls/{key}
+    // ════════════════════════════════════════════════════════
+    const controlKeys = [
+      "manualPumpOverride",
+      "manualPumpState",
+      "oledEnabled",
+      "ultrasonicEnabled",
+      "tempEnabled",
+      "turbidityEnabled"
+    ];
+    controlKeys.forEach((key) => {
+      onValue(ref(db, `/controls/${key}`), (snap) => {
+        const el = document.getElementById(key);
+        if (el) el.checked = snap.val() === true;
+      });
+    });
+
+    // ════════════════════════════════════════════════════════
+    //  TOGGLE HANDLER — Write control value to Firebase
+    // ════════════════════════════════════════════════════════
+    window.toggleControl = function (key, checked) {
+      set(ref(db, `/controls/${key}`), checked)
+        .then(()  => console.log(`[Firebase] ${key} = ${checked}`))
+        .catch((e) => console.error(`[Firebase] Write error: `, e));
+    };
+
+    // ════════════════════════════════════════════════════════
+    //  SVG ARC GAUGE UPDATER
+    // ════════════════════════════════════════════════════════
+    function updateGauge(id, percent) {
+      const arc   = document.getElementById(id);
+      if (!arc) return;
+      const r     = 54;                                 // Radius
+      const circ  = 2 * Math.PI * r;                   // Full circumference
+      const dash  = (Math.min(percent, 100) / 100) * circ * 0.75;  // 75 % arc span
+      arc.style.strokeDasharray  = `${dash} ${circ}`;
+    }
+
+    // ── Animate last-seen timestamp ─────────────────────────
+    onValue(ref(db, "/sensors/timestamp"), (snap) => {
+      const ms  = snap.val() ?? 0;
+      const d   = new Date(Date.now());                 // Use wall-clock for display
+      document.getElementById("lastUpdated").textContent =
+        "Last updated: " + d.toLocaleTimeString();
+    });
+  </script>
+
+  <!-- ═══════════════════════════════════════════════════════
+       STYLES
+  ════════════════════════════════════════════════════════ -->
+  <style>
+    /* ── Reset & Root Variables ─────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0d1117;
+      --surface:     #161b22;
+      --surface2:    #1c2333;
+      --border:      #30363d;
+      --primary:     #58a6ff;
+      --primary-dim: #1f6feb;
+      --success:     #3fb950;
+      --warning:     #d29922;
+      --danger:      #f85149;
+      --info:        #79c0ff;
+      --text:        #c9d1d9;
+      --text-dim:    #8b949e;
+      --radius:      14px;
+      --shadow:      0 4px 24px rgba(0,0,0,.45);
+      --transition:  .25s cubic-bezier(.4,0,.2,1);
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      padding: 16px;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      text-align: center;
+      padding: 28px 16px 20px;
+    }
+    header h1 {
+      font-size: clamp(1.4rem, 5vw, 2.2rem);
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--primary), #a371f7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+    header p {
+      color: var(--text-dim);
+      font-size: .9rem;
+      margin-top: 6px;
+    }
+    #lastUpdated {
+      display: inline-block;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: .78rem;
+      color: var(--text-dim);
+      margin-top: 10px;
+    }
+
+    /* ── Main Layout (Monitoring + Controls side by side on wide screens) */
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 24px;
+    }
+    @media (min-width: 900px) {
+      main { grid-template-columns: 1fr 1fr; }
+      .section-title { grid-column: 1 / -1; }
+    }
+
+    /* ── Section Titles ──────────────────────────────────── */
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      padding: 0 4px;
+      border-left: 3px solid var(--primary);
+      padding-left: 10px;
+    }
+
+    /* ── Card ────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px;
+      box-shadow: var(--shadow);
+      transition: transform var(--transition), box-shadow var(--transition);
+      position: relative;
+      overflow: hidden;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 32px rgba(0,0,0,.55);
+    }
+    .card::before {   /* Subtle top accent line */
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--primary), #a371f7);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .card-label {
+      font-size: .78rem;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+    }
+
+    /* ── Gauge (SVG Arc) ─────────────────────────────────── */
+    .gauge-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .gauge-svg {
+      width: 140px; height: 148px;
+      overflow: hidden;
+    }
+    /* Background track */
+    .gauge-track {
+      fill: none;
+      stroke: var(--surface2);
+      stroke-width: 10;
+      stroke-linecap: round;
+      /* 75% of circumference, offset so arc starts at ~7 o'clock */
+      stroke-dasharray: 254 339;
+      stroke-dashoffset: -42;
+    }
+    /* Foreground arc */
+    .gauge-arc {
+      fill: none;
+      stroke: var(--primary);
+      stroke-width: 10;
+      stroke-linecap: round;
+      stroke-dasharray: 0 339;
+      stroke-dashoffset: -42;
+      transition: stroke-dasharray .6s cubic-bezier(.4,0,.2,1);
+    }
+    .gauge-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-top: 6px;
+    }
+
+    /* ── Badges ──────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      padding: 3px 12px;
+      border-radius: 20px;
+      font-size: .78rem;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+    .badge-good    { background: rgba(63,185,80,.15); color: var(--success); border: 1px solid var(--success); }
+    .badge-warning { background: rgba(210,153,34,.15); color: var(--warning); border: 1px solid var(--warning); }
+    .badge-danger  { background: rgba(248,81,73,.15);  color: var(--danger);  border: 1px solid var(--danger); }
+    .badge-info    { background: rgba(121,192,255,.15); color: var(--info);   border: 1px solid var(--info); }
+
+    /* ── Tank Visualiser ─────────────────────────────────── */
+    .tank-container {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      margin-top: 14px;
+    }
+    .tank {
+      width: 60px;
+      height: 100px;
+      border: 2px solid var(--border);
+      border-radius: 4px 4px 8px 8px;
+      background: var(--surface2);
+      position: relative;
+      overflow: hidden;
+    }
+    .tank-fill {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 0%;
+      background: linear-gradient(180deg, #58a6ff88, #1f6feb);
+      transition: height .8s ease;
+      border-radius: 0 0 6px 6px;
+    }
+
+    /* ── Turbidity Status ────────────────────────────────── */
+    .turb-status {
+      font-size: .82rem;
+      margin-top: 8px;
+      padding: 6px 12px;
+      border-radius: 8px;
+    }
+    .status-good     { background: rgba(63,185,80,.1);   color: var(--success); }
+    .status-moderate { background: rgba(210,153,34,.1);  color: var(--warning); }
+    .status-poor     { background: rgba(248,81,73,.1);   color: var(--danger);  }
+
+    /* ── Pump Indicator ──────────────────────────────────── */
+    .pump-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .85rem;
+      font-weight: 600;
+      margin-top: 12px;
+    }
+    .pump-indicator::before {
+      content: '';
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .pump-on  { color: var(--success); }
+    .pump-on::before  { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse 1.2s infinite; }
+    .pump-off { color: var(--text-dim); }
+    .pump-off::before { background: var(--text-dim); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: .5; transform: scale(1.3); }
+    }
+
+    /* ── Toggle Switch ───────────────────────────────────── */
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+    .control-row:last-child { border-bottom: none; }
+
+    .control-info { flex: 1; }
+    .control-name {
+      font-size: .95rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .control-desc {
+      font-size: .78rem;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+
+    /* The actual toggle switch */
+    .toggle-label {
+      position: relative;
+      display: inline-block;
+      width: 52px;
+      height: 28px;
+      flex-shrink: 0;
+    }
+    .toggle-label input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      transition: background var(--transition), border-color var(--transition);
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 20px; height: 20px;
+      left: 3px; top: 3px;
+      background: var(--text-dim);
+      border-radius: 50%;
+      transition: transform var(--transition), background var(--transition);
+    }
+    .toggle-label input:checked + .toggle-slider {
+      background: var(--primary-dim);
+      border-color: var(--primary);
+    }
+    .toggle-label input:checked + .toggle-slider::before {
+      transform: translateX(24px);
+      background: var(--primary);
+    }
+
+    /* ── Control section full-width ──────────────────────── */
+    .controls-section {
+      grid-column: 1 / -1;
+    }
+
+    /* ── Footer ──────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      color: var(--text-dim);
+      font-size: .78rem;
+      padding: 24px 0 12px;
+      grid-column: 1 / -1;
+    }
+
+    /* ── Responsive: stack on mobile ────────────────────── */
+    @media (max-width: 899px) {
+      .controls-section { grid-column: 1; }
+      footer             { grid-column: 1; }
+    }
+
+    /* ══════════════════════════════════════════════════════
+       NOTIFICATION SYSTEM
+    ══════════════════════════════════════════════════════ */
+
+    /* Bell toggle button in header */
+    .notif-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 12px;
+      padding: 7px 18px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text-dim);
+      font-size: .85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+    .notif-toggle-btn:hover { border-color: var(--primary); color: var(--text); }
+    .notif-toggle-btn.notif-on {
+      background: rgba(88,166,255,.12);
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    .notif-toggle-btn .bell-icon { font-size: 1rem; }
+
+    /* Toast notification (bottom-right popup) */
+    #toastContainer {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 9999;
+      max-width: 320px;
+    }
+    .toast {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--primary);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      box-shadow: var(--shadow);
+      animation: slideIn .3s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .toast.toast-warn  { border-left-color: var(--warning); }
+    .toast.toast-danger{ border-left-color: var(--danger);  }
+    .toast.toast-good  { border-left-color: var(--success); }
+    .toast-title { font-size: .88rem; font-weight: 700; color: var(--text); }
+    .toast-body  { font-size: .78rem; color: var(--text-dim); }
+    .toast-time  { font-size: .72rem; color: var(--text-dim); opacity: .7; }
+    @keyframes slideIn {
+      from { transform: translateX(110%); opacity: 0; }
+      to   { transform: translateX(0);    opacity: 1; }
+    }
+    @keyframes slideOut {
+      from { transform: translateX(0);    opacity: 1; }
+      to   { transform: translateX(110%); opacity: 0; }
+    }
+
+    /* Notification history panel */
+    .notif-history {
+      max-height: 260px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .notif-history:empty::after {
+      content: 'No notifications yet';
+      color: var(--text-dim);
+      font-size: .82rem;
+      text-align: center;
+      padding: 20px 0;
+      display: block;
+    }
+    .notif-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: .82rem;
+    }
+    .notif-item-title { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+    .notif-item-body  { color: var(--text-dim); }
+    .notif-item-time  { color: var(--text-dim); font-size: .72rem; margin-top: 4px; opacity:.7; }
+    .notif-clear-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      border-radius: 8px;
+      padding: 4px 12px;
+      font-size: .78rem;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: all var(--transition);
+    }
+    .notif-clear-btn:hover { border-color: var(--danger); color: var(--danger); }
+  </style>
+</head>
+
+<body>
+
+  <!-- Toast Container (bottom-right popups) -->
+  <div id="toastContainer"></div>
+
+  <!-- ═══════════════════════════════ HEADER ═══════════════ -->
+  <header>
+    <h1>💧 Smart Water Tank Monitor</h1>
+    <p>NodeMCU ESP8266 · Firebase Realtime Database</p>
+    <div id="lastUpdated">Connecting…</div>
+    <!-- Notification toggle bell button -->
+    <br/>
+    <button class="notif-toggle-btn notif-on" id="notifToggleBtn" onclick="toggleNotifications()">
+      <span class="bell-icon">🔔</span>
+      <span id="notifBtnText">Notifications ON</span>
+    </button>
+  </header>
+
+  <main>
+
+    <!-- ════════════════════════════════════════════════════
+         MONITORING SECTION — Water Level
+    ═════════════════════════════════════════════════════ -->
+    <p class="section-title" style="grid-column:1/-1">📊 Live Monitoring</p>
+
+    <!-- Water Level Card -->
+    <div class="card">
+      <div class="card-label">Water Level</div>
+      <div class="gauge-wrapper">
+        <!-- SVG arc gauge -->
+        <svg class="gauge-svg" viewBox="0 0 120 128">
+          <circle class="gauge-track" cx="60" cy="70" r="54"/>
+          <circle class="gauge-arc"   cx="60" cy="70" r="54" id="levelGauge"/>
+        </svg>
+        <div class="gauge-value" id="levelValue">—</div>
+        <span class="badge badge-good" id="levelBadge">Loading…</span>
+      </div>
+
+      <!-- Visual tank fill -->
+      <div class="tank-container">
+        <div class="tank">
+          <div class="tank-fill" id="tankFill"></div>
+        </div>
+      </div>
+
+      <div class="pump-indicator pump-off" id="pumpIndicator">
+        <span id="pumpIndicatorText">PUMP IDLE</span>
+      </div>
+    </div>
+
+    <!-- Temperature Card -->
+    <div class="card">
+      <div class="card-label">Water Temperature</div>
+      <div class="gauge-wrapper">
+        <svg class="gauge-svg" viewBox="0 0 120 128">
+          <circle class="gauge-track" cx="60" cy="70" r="54"/>
+          <circle class="gauge-arc" style="stroke:#f78166" cx="60" cy="70" r="54" id="tempGauge"/>
+        </svg>
+        <div class="gauge-value" id="tempValue">—</div>
+        <span class="badge badge-good" id="tempBadge">Loading…</span>
+      </div>
+      <p style="font-size:.78rem;color:var(--text-dim);margin-top:14px;text-align:center;">
+        Gauge scale: 0 °C → 50 °C
+      </p>
+    </div>
+
+    <!-- Turbidity Card (full-width) -->
+    <div class="card" style="grid-column:1/-1">
+      <div class="card-label">Turbidity (Water Clarity)</div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:24px;">
+        <div class="gauge-wrapper">
+          <svg class="gauge-svg" viewBox="0 0 120 128">
+            <circle class="gauge-track" cx="60" cy="70" r="54"/>
+            <circle class="gauge-arc" style="stroke:#d29922" cx="60" cy="70" r="54" id="turbGauge"/>
+          </svg>
+          <div class="gauge-value" id="turbValue">—</div>
+          <span class="badge badge-good" id="turbBadge">Loading…</span>
+        </div>
+        <div style="flex:1;min-width:200px;">
+          <p class="turb-status status-good" id="turbStatus">Awaiting data…</p>
+          <p style="font-size:.78rem;color:var(--text-dim);margin-top:10px;">
+            0% = very turbid &nbsp;|&nbsp; 100% = crystal clear<br/>
+            Auto-pump activates when turbidity &lt; 50% (dirty water)
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════
+         CONTROL PANEL SECTION
+    ═════════════════════════════════════════════════════ -->
+    <p class="section-title controls-section">🎛️ Control Panel</p>
+
+    <!-- Pump Controls Card -->
+    <div class="card controls-section">
+      <div class="card-label">Pump Control</div>
+
+      <!-- Toggle: Manual Override Mode -->
+      <div class="control-row">
+        <div class="control-info">
+          <div class="control-name">⚙ Manual Override</div>
+          <div class="control-desc">
+            ON = manual pump control &nbsp;|&nbsp; OFF = auto mode (turbidity-based)
+          </div>
+        </div>
+        <label class="toggle-label">
+          <input type="checkbox" id="manualPumpOverride"
+                 onchange="toggleControl('manualPumpOverride', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <!-- Toggle: Manual Pump State -->
+      <div class="control-row">
+        <div class="control-info">
+          <div class="control-name">💧 Pump Power</div>
+          <div class="control-desc">Manually turn the pump ON or OFF (requires Manual Override)</div>
+        </div>
+        <label class="toggle-label">
+          <input type="checkbox" id="manualPumpState"
+                 onchange="toggleControl('manualPumpState', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Peripherals Controls Card -->
+    <div class="card controls-section">
+      <div class="card-label">Peripheral Controls</div>
+
+      <!-- OLED Display -->
+      <div class="control-row">
+        <div class="control-info">
+          <div class="control-name">🖥 OLED Display</div>
+          <div class="control-desc">Turn the onboard OLED screen on or off</div>
+        </div>
+        <label class="toggle-label">
+          <input type="checkbox" id="oledEnabled"
+                 onchange="toggleControl('oledEnabled', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <!-- Ultrasonic Sensor -->
+      <div class="control-row">
+        <div class="control-info">
+          <div class="control-name">📡 Ultrasonic Sensor</div>
+          <div class="control-desc">Enable or disable water-level readings (HC-SR04)</div>
+        </div>
+        <label class="toggle-label">
+          <input type="checkbox" id="ultrasonicEnabled"
+                 onchange="toggleControl('ultrasonicEnabled', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <!-- Temp Sensor -->
+      <div class="control-row">
+        <div class="control-info">
+          <div class="control-name">🌡 Temperature Sensor</div>
+          <div class="control-desc">Enable or disable DS18B20 temperature readings</div>
+        </div>
+        <label class="toggle-label">
+          <input type="checkbox" id="tempEnabled"
+                 onchange="toggleControl('tempEnabled', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <!-- Turbidity Sensor -->
+      <div class="control-row">
+        <div class="control-info">
+          <div class="control-name">💡 Turbidity Sensor</div>
+          <div class="control-desc">Enable or disable water-clarity (turbidity) readings</div>
+        </div>
+        <label class="toggle-label">
+          <input type="checkbox" id="turbidityEnabled"
+                 onchange="toggleControl('turbidityEnabled', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Notification History Card -->
+    <div class="card controls-section">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+        <div class="card-label" style="margin-bottom:0">🔔 Notification History</div>
+        <button class="notif-clear-btn" onclick="clearNotifHistory()">🗑 Clear All</button>
+      </div>
+      <div class="notif-history" id="notifHistory"></div>
+    </div>
+
+    <!-- Footer -->
+    <footer>
+      Smart Water Monitoring System · NodeMCU ESP8266 + Firebase RTDB
+    </footer>
+
+  </main><!-- /main -->
+
+  <!-- ═══════════════════════════════════════════════════════
+       NOTIFICATION ENGINE
+  ════════════════════════════════════════════════════════ -->
+  <script>
+    // ── State ────────────────────────────────────────────────
+    let notificationsEnabled = localStorage.getItem('notifEnabled') !== 'false';
+    const COOLDOWN_MS  = 3 * 60 * 1000;  // 3 min cooldown between same-type alerts
+    const TOAST_DURATION = 5000;          // Toast visible for 5 seconds
+    const lastNotifTime  = {};
+    const MAX_HISTORY    = 20;
+
+    // Restore button state on load
+    (function init() {
+      updateBellButton();
+      if (notificationsEnabled && 'Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
+    })();
+
+    // ── Toggle ON / OFF ──────────────────────────────────────
+    window.toggleNotifications = function() {
+      notificationsEnabled = !notificationsEnabled;
+      localStorage.setItem('notifEnabled', notificationsEnabled);
+      updateBellButton();
+      if (notificationsEnabled) {
+        if ('Notification' in window && Notification.permission === 'default') {
+          Notification.requestPermission();
+        }
+        showToast('toast', '🔔 Notifications ON', 'You will receive alerts for sensor thresholds.');
+      } else {
+        showToast('toast', '🔕 Notifications OFF', 'All alerts have been muted.');
+      }
+    };
+
+    function updateBellButton() {
+      const btn  = document.getElementById('notifToggleBtn');
+      const text = document.getElementById('notifBtnText');
+      if (!btn) return;
+      if (notificationsEnabled) {
+        btn.className = 'notif-toggle-btn notif-on';
+        text.textContent = 'Notifications ON';
+        btn.querySelector('.bell-icon').textContent = '🔔';
+      } else {
+        btn.className = 'notif-toggle-btn';
+        text.textContent = 'Notifications OFF';
+        btn.querySelector('.bell-icon').textContent = '🔕';
+      }
+    }
+
+    // ── Core notify function ─────────────────────────────────
+    function notify(type, title, body, severity) {
+      if (!notificationsEnabled) return;
+      const now = Date.now();
+      if (lastNotifTime[type] && (now - lastNotifTime[type]) < COOLDOWN_MS) return;
+      lastNotifTime[type] = now;
+
+      showToast(severity, title, body);
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification(title, { body });
+      }
+      addToHistory(title, body);
+    }
+
+    function showToast(severity, title, body) {
+      const c     = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = `toast ${severity}`;
+      toast.innerHTML = `<div class="toast-title">${title}</div>
+        <div class="toast-body">${body}</div>
+        <div class="toast-time">${new Date().toLocaleTimeString()}</div>`;
+      c.appendChild(toast);
+      setTimeout(() => {
+        toast.style.animation = 'slideOut .3s ease forwards';
+        setTimeout(() => toast.remove(), 300);
+      }, TOAST_DURATION);
+    }
+
+    function addToHistory(title, body) {
+      const h    = document.getElementById('notifHistory');
+      const item = document.createElement('div');
+      item.className = 'notif-item';
+      item.innerHTML = `<div class="notif-item-title">${title}</div>
+        <div class="notif-item-body">${body}</div>
+        <div class="notif-item-time">${new Date().toLocaleTimeString()}</div>`;
+      h.insertBefore(item, h.firstChild);
+      while (h.children.length > MAX_HISTORY) h.removeChild(h.lastChild);
+    }
+
+    window.clearNotifHistory = function() {
+      document.getElementById('notifHistory').innerHTML = '';
+    };
+
+    // ════════════════════════════════════════════════════════
+    //  THRESHOLD CHECK FUNCTIONS (called from Firebase listeners)
+    // ════════════════════════════════════════════════════════
+
+    window.checkLevelNotif = function(pct) {
+      if      (pct < 20) notify('level-low',  '⚠️ Water Level LOW!',  `Tank almost empty — ${pct.toFixed(1)}% remaining.`, 'toast-danger');
+      else if (pct > 80) notify('level-high', '📈 Water Level HIGH!', `Tank almost full — level at ${pct.toFixed(1)}%.`,    'toast-warn');
+      else { delete lastNotifTime['level-low']; delete lastNotifTime['level-high']; }
+    };
+
+    window.checkTempNotif = function(val) {
+      if      (val < 24) notify('temp-low',  '❄️ Temperature Dropping!', `Temp is ${val.toFixed(1)}°C — below 24°C.`, 'toast');
+      else if (val > 30) notify('temp-high', '🔥 Temperature Rising!',   `Temp is ${val.toFixed(1)}°C — above 30°C.`, 'toast-warn');
+      else { delete lastNotifTime['temp-low']; delete lastNotifTime['temp-high']; }
+    };
+
+    window.checkTurbNotif = function(val) {
+      if (val < 50) notify('water-dirty', '💧 Water Quality POOR!', `Turbidity ${val.toFixed(1)}% — dirty water. Pump auto-activating.`, 'toast-danger');
+      else delete lastNotifTime['water-dirty'];
+    };
+
+    window.checkPumpNotif = function(isOn) {
+      if (isOn) notify('pump-on', '⚡ Pump is Running', 'The water pump has been activated.', 'toast-warn');
+      else delete lastNotifTime['pump-on'];
+    };
+  </script>
+
+</body>
+</html>
